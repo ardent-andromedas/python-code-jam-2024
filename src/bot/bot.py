@@ -189,6 +189,16 @@ class EcoCordClient(discord.Client):
 
             message_queue.append(new_message)
 
+    async def timelapse(self, interaction: discord.Interaction, channels: list[discord.TextChannel], timerange: str) \
+            -> None:
+
+        """
+
+        args: channels to create timelapse for, time range to grab messages from in Minutes and Seconds
+
+        """
+        # interaction.response.send_message(content="Done!",embed=Ecosystem.TimeLapse(channels,timerange)
+
     async def run_bot(self) -> None:
         """Start the bot and connects to Discord."""
         print("Starting bot...")
