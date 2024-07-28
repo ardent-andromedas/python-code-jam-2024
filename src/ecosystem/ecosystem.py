@@ -20,11 +20,11 @@ from PIL import Image
 
 from bot.discord_event import (
     DiscordEvent,
-    FakeUser,
     SerializableGuild,
     SerializableMember,
     SerializableTextChannel,
 )
+from storage import Database, UserInfo
 
 from .bird import Bird
 from .cloud_manager import CloudManager
@@ -245,7 +245,7 @@ class Ecosystem:
             self.frame_count += 1
 
             if self.frame_count % self.frames_per_gif == 0:
-                (self.frame_count_queue.put(self.frame_count))
+                self.frame_count_queue.put(self.frame_count)
 
     def interpolate_color(
         self, color1: tuple[int, int, int], color2: tuple[int, int, int], t: float
@@ -315,7 +315,7 @@ class Ecosystem:
                         save_all=True,
                         append_images=optimized_frames[1:],
                         optimize=False,
-                        duration=[duration] * (len(optimized_frames) - 1) + [15000],
+                        duration=[duration] * (len(optimized_frames)),
                         loop=0,
                     )
 
@@ -457,7 +457,17 @@ class EcosystemManager:
             return
 
         self.running = True
-        self.process = multiprocessing.Process(target=self._run_ecosystem, args=(show_controls,))
+
+        def run_and_catch_exceptions(show_controls):
+            try:
+                self._run_ecosystem(show_controls)
+            except Exception as e:
+                print(f"Exception in _run_ecosystem: {e}")
+                import traceback
+
+                traceback.print_exc()
+
+        self.process = multiprocessing.Process(target=run_and_catch_exceptions, args=(show_controls,))
         self.process.start()
 
     def stop(self) -> None:
@@ -475,7 +485,9 @@ class EcosystemManager:
             show_controls (bool): Whether to show UI controls.
 
         """
+        print("Initializing Pygame")
         pygame.init()
+        print("Pygame initialized")
 
         if self.interactive:
             screen = pygame.display.set_mode((self.width, self.height))
@@ -589,40 +601,44 @@ class EcosystemManager:
         )
         screen.blit(stats_text, (25, ecosystem.activity_slider.y + 70))
 
-    def process_event(self, event: DiscordEvent) -> None:
+    def process_event(self, event: DiscordEvent, user_info: UserInfo) -> None:
         """Process a Discord event in the ecosystem.
 
         Args:
         ----
             event (DiscordEvent): The Discord event to process.
+            user_info (UserInfo): User information including avatar and role color.
 
         """
-        self.command_queue.put(("process_event", event))
+        self.command_queue.put(("process_event", (event, user_info)))
 
-    def _process_event(self, ecosystem: Ecosystem, event: DiscordEvent) -> None:
+    def _process_event(self, ecosystem: Ecosystem, event_data: tuple[DiscordEvent, UserInfo]) -> None:
         """Process a Discord event within the ecosystem process.
 
         Args:
         ----
             ecosystem (Ecosystem): The ecosystem instance.
-            event (DiscordEvent): The Discord event to process.
+            event_data (tuple[DiscordEvent, UserInfo]): The Discord event and user info to process.
 
         """
+        event, user_info = event_data
         current_time = time.time()
         user_id = event.member.id
 
         if event.type in ("TYPING", "MESSAGE"):
-            self._handle_user_activity(ecosystem, user_id, current_time, event.type == "TYPING")
+            self._handle_user_activity(ecosystem, user_id, current_time, event.type == "TYPING", user_info)
 
             if event.type == "MESSAGE":
                 critter = self.user_frogs.get(user_id)
                 if critter:
-                    speech_bubble = SpeechBubble(critter, event.content, duration=5)
+                    speech_bubble = SpeechBubble(critter, event.content, duration=5, bg_color=user_info.role_color)
                     ecosystem.speech_bubbles.append(speech_bubble)
 
         self._remove_inactive_users(ecosystem, current_time)
 
-    def _handle_user_activity(self, ecosystem: Ecosystem, user_id: int, current_time: float, is_typing: bool) -> None:
+    def _handle_user_activity(
+        self, ecosystem: Ecosystem, user_id: int, current_time: float, is_typing: bool, user_info: UserInfo
+    ) -> None:
         """Handle user activity in the ecosystem.
 
         Args:
@@ -631,48 +647,53 @@ class EcosystemManager:
             user_id (int): ID of the user.
             current_time (float): Current timestamp.
             is_typing (bool): Whether the user is typing.
+            user_info (UserInfo): User information including avatar and role color.
 
         """
         if user_id not in self.user_frogs:
-            self._spawn_new_critter(ecosystem, user_id)
+            self._spawn_new_critter(ecosystem, user_id, user_info)
         elif is_typing:
             self.user_frogs[user_id].move()
 
         self.last_activity[user_id] = current_time
         self._remove_inactive_users(ecosystem, current_time)
 
-    def set_online_critters(self, online_members: list[int]) -> None:
-        """Set the online critters based on the list of online members.
+    def set_online_critters(self, online_members: list[UserInfo]) -> None:
+        """Set the online critters based on the list of online members' info.
 
         Args:
         ----
-            online_members (list[int]): List of online member IDs.
+            online_members (List[UserInfo]): List of UserInfo objects for online members.
 
         """
         self.command_queue.put(("set_online_critters", online_members))
 
-    def _set_online_critters(self, ecosystem: Ecosystem, online_members: list[int]) -> None:
+    def _set_online_critters(self, ecosystem: Ecosystem, online_members: list[UserInfo]) -> None:
         """Set the online critters within the ecosystem process.
 
         Args:
         ----
             ecosystem (Ecosystem): The ecosystem instance.
-            online_members (list[int]): List of online member IDs.
+            online_members (List[UserInfo]): List of UserInfo objects for online members.
 
         """
-        for member_id in online_members:
-            self._spawn_new_critter(ecosystem, member_id)
-            print(f"{member_id}'s critter spawned")
+        for user_info in online_members:
+            self._spawn_new_critter(ecosystem, user_info.user_id, user_info)
+            print(f"{user_info.user_id}'s critter spawned")
 
-    def _spawn_new_critter(self, ecosystem: Ecosystem, user_id: int) -> None:
+    def _spawn_new_critter(self, ecosystem: Ecosystem, user_id: int, user_info: UserInfo | None = None) -> None:
         if user_id not in self.user_frogs:
             critter_type = random.choice([Frog, Bird, Snake])
+
+            avatar_data = user_info.avatar_data if user_info else None
+
             critter = critter_type(
                 user_id,
                 random.randint(0, ecosystem.width),
                 ecosystem.height - 20,
                 ecosystem.width,
                 ecosystem.height,
+                avatar=avatar_data,
             )
             critter.spawn()
             self.user_frogs[user_id] = critter
@@ -719,21 +740,37 @@ class EcosystemManager:
             self.fake_user_ids.append(user_id)
             self._spawn_new_critter(ecosystem, user_id)
 
-    def _simulate_random_message(self, ecosystem: Ecosystem) -> None:
+    async def _simulate_random_message(self, ecosystem: Ecosystem) -> None:
         if not self.fake_user_ids:
-            return  # No fake users to simulate messages from
+            return
 
-        user_id = random.choice(self.fake_user_ids)
-        content = "Hello, ecosystem!"
         guild_id = random.randint(1, 1000000)
         channel_id = random.randint(1, 1000000)
-        user = FakeUser(user_id, f"Simulated User {user_id}")
-        event = DiscordEvent(
-            type="MESSAGE",
-            content=content,
-            timestamp=datetime.now(UTC),
-            guild=SerializableGuild(guild_id, "Simulated Guild", 0),
-            channel=SerializableTextChannel(channel_id, "simulated-channel"),
-            member=SerializableMember(user.id, f"SimulatedUser_{user_id}", user.display_name, []),
-        )
-        self._process_event(ecosystem, event)
+
+        async def simulate():
+            db = Database("ecocord")
+            await db.initialize()
+            user_info = await db.get_random_user_info(guild_id)
+
+            if user_info:
+                content = "Hello, ecosystem!"
+                event = DiscordEvent(
+                    type="MESSAGE",
+                    content=content,
+                    timestamp=datetime.now(UTC),
+                    guild=SerializableGuild(guild_id, "Simulated Guild", 0),
+                    channel=SerializableTextChannel(channel_id, "simulated-channel"),
+                    member=SerializableMember(
+                        user_info.user_id,
+                        f"SimulatedUser_{user_info.user_id}",
+                        f"SimulatedUser_{user_info.user_id}",
+                        guild_id,
+                        user_info.avatar_data,
+                        user_info.role_color,
+                    ),
+                )
+                self._process_event(ecosystem, (event, user_info))
+            else:
+                print("No user info found in the database.")
+
+        await simulate()

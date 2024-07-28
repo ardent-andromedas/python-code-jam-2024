@@ -2,14 +2,16 @@ import asyncio
 import io
 import logging
 from collections import deque
+from datetime import datetime, timedelta
 
+import aiohttp
 import discord
 from discord import app_commands
 
 from ecosystem import EcosystemManager
-from storage.models import Database, GuildConfig, event_db_builder
+from storage.models import Database, GuildConfig, UserInfo, event_db_builder
 
-from .discord_event import DiscordEvent, EventType
+from .discord_event import DiscordEvent, EventType, SerializableMember
 from .settings import BOT_TOKEN
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s:%(levelname)s:%(name)s: %(message)s")
@@ -70,21 +72,35 @@ class EcoCordClient(discord.Client):
                 channels = [guild.get_channel(channel_id) for channel_id in config.allowed_channels]
                 await self.reconfigure_channels(guild.id, channels)
 
-        print("here")
-        online_members = [member.id for member in guild.members if member.status != discord.Status.offline]
-        for ecosystem_manager in self.guilds_data[guild.id]["ecosystem_managers"].values():
-            ecosystem_manager.set_online_critters(online_members)
-
-        print("there")
         # Start the task to update online critters
-        self.loop.create_task(self.update_online_critters(guild))
+        self.loop.create_task(
+            self.safe_task(self.update_online_critters(guild), f"update_online_critters for {guild.name}")
+        )
 
     async def update_online_critters(self, guild: discord.Guild) -> None:
         """Periodically update online critters for all ecosystem managers in the guild."""
         while True:
-            online_members = [member.id for member in guild.members if member.status != discord.Status.offline]
-            for ecosystem_manager in self.guilds_data[guild.id]["ecosystem_managers"].values():
-                ecosystem_manager.set_online_critters(online_members)
+            try:
+                online_members = [member for member in guild.members if member.status != discord.Status.offline]
+
+                if guild.id not in self.guilds_data:
+                    print(f"Guild data not found for {guild.name} (ID: {guild.id})")
+                    await asyncio.sleep(5)
+                    continue
+
+                ecosystem_managers = self.guilds_data[guild.id]["ecosystem_managers"]
+
+                # Fetch UserInfo for all online members
+                online_members_info: List[UserInfo] = []
+                for member in online_members:
+                    user_info = await self.get_user_info(member)
+                    online_members_info.append(user_info)
+
+                for ecosystem_manager in ecosystem_managers.values():
+                    ecosystem_manager.set_online_critters(online_members_info)
+            except Exception as e:
+                print(f"Error in update_online_critters for guild {guild.name}: {e!s}")
+
             await asyncio.sleep(5)
 
     async def on_message(self, message: discord.Message) -> None:
@@ -157,6 +173,42 @@ class EcoCordClient(discord.Client):
         )
         await self.process_event(event)
 
+    async def get_user_info(self, member: discord.Member | SerializableMember) -> UserInfo:
+        """Fetch and store user avatar and role color for a specific guild."""
+        now = datetime.utcnow()
+
+        # Check if member is a SerializableMember or discord.Member
+        if isinstance(member, SerializableMember):
+            user_id = member.id
+            guild_id = member.guild_id
+        else:  # discord.Member
+            user_id = member.id
+            guild_id = member.guild.id
+
+        user_info = await self.database.get_user_info(user_id, guild_id)
+
+        if user_info is None or (now - user_info.last_updated) > timedelta(hours=1):
+            if isinstance(member, SerializableMember):
+                avatar_url = member.avatar
+                role_color = member.color
+            else:  # discord.Member
+                avatar_url = str(member.avatar.url) if member.avatar else None
+                role_color = str(member.color)
+
+            if avatar_url:
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(avatar_url) as resp:
+                        avatar_data = await resp.read()
+            else:
+                avatar_data = None
+
+            user_info = UserInfo(
+                user_id=user_id, guild_id=guild_id, avatar_data=avatar_data, role_color=role_color, last_updated=now
+            )
+            await self.database.set_user_info(user_info)
+
+        return user_info
+
     async def process_event(self, event: DiscordEvent) -> None:
         """Process a DiscordEvent by logging it and passing it to the corresponding ecosystem manager."""
         if event.member.id == self.user.id:
@@ -170,7 +222,8 @@ class EcoCordClient(discord.Client):
         if guild_data:
             ecosystem_manager = guild_data["ecosystem_managers"].get(event.channel.id)
             if ecosystem_manager:
-                ecosystem_manager.process_event(event)
+                user_info = await self.get_user_info(event.member)
+                ecosystem_manager.process_event(event, user_info)
             db_event = await event_db_builder(event)
             await self.database.insert_event(db_event)
 
@@ -183,26 +236,28 @@ class EcoCordClient(discord.Client):
         gif_channel = await self.fetch_channel(guild_data["gif_channel_id"])
         existing_threads = {thread.name: thread for thread in gif_channel.threads}
 
-        gif_tasks = []
-
         for channel in channels:
-            if channel.id not in guild_data["ecosystem_managers"]:
-                ecosystem_manager = EcosystemManager(generate_gifs=True, interactive=False)
-                ecosystem_manager.start(show_controls=False)
-                guild_data["ecosystem_managers"][channel.id] = ecosystem_manager
+            if channel.id in guild_data["ecosystem_managers"]:
+                continue
+            ecosystem_manager = EcosystemManager(generate_gifs=True, interactive=False)
+            ecosystem_manager.start(show_controls=False)
+            guild_data["ecosystem_managers"][channel.id] = ecosystem_manager
 
-                thread_name = f"Ecosystem-{channel.name}"
-                if thread_name in existing_threads:
-                    thread = existing_threads[thread_name]
-                    print(f"Reusing existing thread for {channel.name}")
-                else:
-                    thread = await gif_channel.create_thread(name=thread_name, type=discord.ChannelType.public_thread)
-                    print(f"Created new thread for {channel.name}")
+            thread_name = f"Ecosystem-{channel.name}"
+            if thread_name in existing_threads:
+                thread = existing_threads[thread_name]
+                print(f"Reusing existing thread for {channel.name}")
+            else:
+                thread = await gif_channel.create_thread(name=thread_name, type=discord.ChannelType.public_thread)
+                print(f"Created new thread for {channel.name}")
 
-                gif_tasks.append(self.send_gifs(guild_id, channel.id, thread.id))
-
-        # Start all new gif sending tasks in parallel
-        await asyncio.gather(*gif_tasks)
+            # Start the gif sending task in the background
+            self.loop.create_task(
+                self.safe_task(
+                    self.send_gifs(guild_id, channel.id, thread.id),
+                    f"send_gifs for channel {channel.name} in guild {guild_id}",
+                )
+            )
 
     async def stop_ecosystems(self, guild_id: int, channel_ids: list[int] | None = None) -> None:
         """Stop specified ecosystem managers or all if not specified."""
@@ -249,14 +304,6 @@ class EcoCordClient(discord.Client):
 
     async def send_gifs(self, guild_id: int, channel_id: int, thread_id: int) -> None:
         """Continuously sends GIFs of the ecosystem to a designated thread."""
-        guild_data = self.guilds_data.get(guild_id)
-        if not guild_data:
-            return
-
-        ecosystem_manager = guild_data["ecosystem_managers"].get(channel_id)
-        if not ecosystem_manager:
-            return
-
         while not self.ready:
             await asyncio.sleep(1)
 
@@ -273,6 +320,14 @@ class EcoCordClient(discord.Client):
         message_queue.extend(existing_messages)
 
         while True:
+            guild_data = self.guilds_data.get(guild_id)
+            if not guild_data:
+                return
+
+            ecosystem_manager = guild_data["ecosystem_managers"].get(channel_id)
+            if not ecosystem_manager:
+                return
+
             gif_data = ecosystem_manager.get_latest_gif()
             if not gif_data:
                 await asyncio.sleep(0.01)
@@ -281,7 +336,7 @@ class EcoCordClient(discord.Client):
             gif_bytes, timestamp = gif_data
 
             content = f"Ecosystem for #{self.get_channel(channel_id).name}"
-            # Send new message
+            logging.info("Sending new ecosystem GIF message to thread %s in guild %s", thread_id, guild_id)
             new_message = await thread.send(
                 content=content, file=discord.File(io.BytesIO(gif_bytes), filename="ecosystem.gif")
             )
@@ -367,6 +422,15 @@ class EcoCordClient(discord.Client):
             # Remove the guild data
             del self.guilds_data[guild.id]
         logging.info("Removed from guild %s (ID: %s)", guild.name, guild.id)
+
+    async def safe_task(self, coro, task_name):
+        try:
+            await coro
+        except Exception as e:
+            print(f"Exception in {task_name}: {e!s}")
+            import traceback
+
+            traceback.print_exc()
 
 
 class ConfigureView(discord.ui.View):

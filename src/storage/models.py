@@ -1,8 +1,9 @@
+import json
 import logging
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from datetime import datetime
 from enum import Enum
-from pathlib import Path
 
 import aiosqlite
 
@@ -47,6 +48,24 @@ class GuildConfig:
     gif_channel: int | None
 
 
+@dataclass
+class EcosystemState:
+    """Represents the ecosystem state."""
+
+    guild_id: int
+    cloud_image_id: str
+    state_data: dict = field(default_factory=dict)
+
+
+@dataclass
+class UserInfo:
+    user_id: int
+    guild_id: int
+    avatar_data: bytes | None
+    role_color: int | None
+    last_updated: datetime
+
+
 class Database:
     """Handles database operations."""
 
@@ -64,28 +83,44 @@ class Database:
     async def initialize(self) -> None:
         """Initialize the database and create tables if they don't exist."""
         try:
-            if not Path(self.db_file_path).exists():
-                async with aiosqlite.connect(self.db_file_path) as db:
-                    await db.execute("""
-                        CREATE TABLE IF NOT EXISTS events (
-                            id TEXT NOT NULL PRIMARY KEY,
-                            guild_id INT NOT NULL,
-                            event_type TEXT NOT NULL,
-                            timestamp INT NOT NULL,
-                            channel_id INT NOT NULL,
-                            member_id INT NOT NULL,
-                            message_id TEXT,
-                            content TEXT
-                        )
-                    """)
-                    await db.execute("""
-                        CREATE TABLE IF NOT EXISTS guild_config (
-                            guild_id INTEGER PRIMARY KEY,
-                            allowed_channels TEXT NOT NULL,
-                            gif_channel INTEGER
-                        )
-                    """)
-                    await db.commit()
+            async with aiosqlite.connect(self.db_file_path) as db:
+                await db.execute("""
+                    CREATE TABLE IF NOT EXISTS events (
+                        id TEXT NOT NULL PRIMARY KEY,
+                        guild_id INT NOT NULL,
+                        event_type TEXT NOT NULL,
+                        timestamp INT NOT NULL,
+                        channel_id INT NOT NULL,
+                        member_id INT NOT NULL,
+                        message_id TEXT,
+                        content TEXT
+                    )
+                """)
+                await db.execute("""
+                    CREATE TABLE IF NOT EXISTS guild_config (
+                        guild_id INTEGER PRIMARY KEY,
+                        allowed_channels TEXT NOT NULL,
+                        gif_channel INTEGER
+                    )
+                """)
+                await db.execute("""
+                    CREATE TABLE IF NOT EXISTS ecosystem_state (
+                        guild_id INTEGER PRIMARY KEY,
+                        cloud_image_id TEXT NOT NULL,
+                        state_data TEXT NOT NULL
+                    )
+                """)
+                await db.execute("""
+                    CREATE TABLE IF NOT EXISTS user_info (
+                        user_id INTEGER NOT NULL,
+                        guild_id INTEGER NOT NULL,
+                        avatar_data BLOB,
+                        role_color TEXT,
+                        last_updated TIMESTAMP NOT NULL,
+                        PRIMARY KEY (user_id, guild_id)
+                    )
+                """)
+                await db.commit()
             self.logger.info("Database initialized successfully.")
         except aiosqlite.Error:
             self.logger.exception("Failed to initialize database")
@@ -190,6 +225,88 @@ class Database:
                 allowed_channels = list(map(int, allowed_channels_str.split(",")))
                 return GuildConfig(guild_id, allowed_channels, gif_channel)
             return None
+
+    async def save_ecosystem_state(self, state: EcosystemState) -> None:
+        """Save or update the ecosystem state for a guild."""
+        query = """
+        INSERT OR REPLACE INTO ecosystem_state (guild_id, cloud_image_id, state_data)
+        VALUES (?, ?, ?)
+        """
+        state_data_json = json.dumps(state.state_data)
+        data = (state.guild_id, state.cloud_image_id, state_data_json)
+        await self.execute(command=CommandType.INSERT, query=query, parameters=data)
+
+    async def get_ecosystem_state(self, guild_id: int) -> EcosystemState | None:
+        """Retrieve the ecosystem state for a specific guild."""
+        query = """
+        SELECT guild_id, cloud_image_id, state_data
+        FROM ecosystem_state
+        WHERE guild_id = ?
+        """
+        async with aiosqlite.connect(self.db_file_path) as db, db.execute(query, (guild_id,)) as cursor:
+            row = await cursor.fetchone()
+            if row:
+                guild_id, cloud_image_id, state_data_json = row
+                state_data = json.loads(state_data_json)
+                return EcosystemState(guild_id, cloud_image_id, state_data)
+            return None
+
+    async def get_user_info(self, user_id: int, guild_id: int) -> UserInfo | None:
+        """Retrieve user info for a specific user in a specific guild."""
+        query = """
+        SELECT user_id, guild_id, avatar_data, role_color, last_updated
+        FROM user_info
+        WHERE user_id = ? AND guild_id = ?
+        """
+        async with aiosqlite.connect(self.db_file_path) as db:
+            async with db.execute(query, (user_id, guild_id)) as cursor:
+                row = await cursor.fetchone()
+                if row:
+                    return UserInfo(
+                        user_id=row[0],
+                        guild_id=row[1],
+                        avatar_data=row[2],
+                        role_color=row[3],
+                        last_updated=datetime.fromisoformat(row[4]),
+                    )
+                return None
+
+    async def set_user_info(self, user_info: UserInfo) -> None:
+        """Set or update the user info for a specific user in a specific guild."""
+        query = """
+        INSERT OR REPLACE INTO user_info (user_id, guild_id, avatar_data, role_color, last_updated)
+        VALUES (?, ?, ?, ?, ?)
+        """
+        data = (
+            user_info.user_id,
+            user_info.guild_id,
+            user_info.avatar_data,
+            user_info.role_color,
+            user_info.last_updated.isoformat(),
+        )
+        await self.execute(command=CommandType.INSERT, query=query, parameters=data)
+
+    async def get_random_user_info(self, guild_id: int) -> UserInfo | None:
+        """Retrieve random user info for a specific guild."""
+        query = """
+        SELECT user_id, guild_id, avatar_data, role_color, last_updated
+        FROM user_info
+        WHERE guild_id = ?
+        ORDER BY RANDOM()
+        LIMIT 1
+        """
+        async with aiosqlite.connect(self.db_file_path) as db:
+            async with db.execute(query, (guild_id,)) as cursor:
+                row = await cursor.fetchone()
+                if row:
+                    return UserInfo(
+                        user_id=row[0],
+                        guild_id=row[1],
+                        avatar_data=row[2],
+                        role_color=row[3],
+                        last_updated=datetime.fromisoformat(row[4]),
+                    )
+                return None
 
 
 async def event_db_builder(event: DiscordEvent) -> DBEvent:

@@ -1,3 +1,4 @@
+import io
 import random
 
 import pygame
@@ -12,7 +13,7 @@ class Snake(Critter):
     The snake moves towards a target, grows in length, and can spawn or despawn.
     """
 
-    def __init__(self, member_id: int, x: int, y: int, width: int, height: int) -> None:
+    def __init__(self, member_id: int, x: int, y: int, width: int, height: int, avatar=None) -> None:
         """Initialize a new Snake instance.
 
         Args:
@@ -22,6 +23,7 @@ class Snake(Critter):
             y (int): Initial y-coordinate of the snake's head.
             width (int): Width of the game area.
             height (int): Height of the game area.
+            avatar (bytes): The avatar data for the snake.
 
         """
         super().__init__(member_id, x, y, width, height)
@@ -35,6 +37,16 @@ class Snake(Critter):
         self.target = self.get_new_target()
         self.state = "inactive"
         self.scale = 0.1
+
+        self.avatar = avatar
+        self.avatar_surface = None
+        if self.avatar:
+            try:
+                avatar_io = io.BytesIO(self.avatar)
+                avatar_image = pygame.image.load(avatar_io)
+                self.avatar_surface = pygame.transform.scale(avatar_image, (64, 64)).convert_alpha()
+            except Exception as e:
+                print(f"Failed to create avatar surface for frog {member_id}: {e}")
 
     def generate_color(self) -> Color:
         """Generate a random color for the snake.
@@ -106,7 +118,28 @@ class Snake(Critter):
             radius = int((10 * (1 - i / len(self.segments)) + 5) * self.scale)
             alpha = int(255 * (1 - i / len(self.segments)))
             color = (self.color.r, self.color.g, self.color.b, alpha)
-            pygame.draw.circle(surface, color, (int(segment.x), int(segment.y)), radius)
+
+            # Create a surface for the snake segment
+            segment_surface = pygame.Surface((radius * 2, radius * 2), pygame.SRCALPHA)
+
+            # Draw the avatar with 50% opacity if available
+            if self.avatar_surface:
+                avatar_scaled = pygame.transform.scale(self.avatar_surface, (radius * 2, radius * 2))
+                avatar_scaled.set_alpha(128)  # 50% opacity
+                segment_surface.blit(avatar_scaled, (0, 0))
+
+            # Draw the snake segment shape
+            pygame.draw.circle(segment_surface, color, (radius, radius), radius)
+
+            # Create a mask from the segment shape
+            mask = pygame.mask.from_surface(segment_surface)
+            mask_surface = mask.to_surface(setcolor=color, unsetcolor=(0, 0, 0, 0))
+
+            # Combine the avatar and the segment shape using the mask
+            segment_surface.blit(mask_surface, (0, 0), special_flags=pygame.BLEND_RGBA_MULT)
+
+            # Draw the combined segment surface on the main surface
+            surface.blit(segment_surface, (int(segment.x - radius), int(segment.y - radius)))
 
         head = self.segments[0]
         eye_offset = self.direction.normalize() * 8 * self.scale

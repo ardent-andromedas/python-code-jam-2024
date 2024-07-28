@@ -86,6 +86,9 @@ class SerializableMember:
         name (str): The username of the member.
         display_name (str): The display name of the member.
         roles (list[int]): List of role IDs the member has.
+        guild_id (int): The ID of the guild the member belongs to.
+        avatar (str): The URL of the member's avatar.
+        color (int): The color associated with the member's top role.
 
     """
 
@@ -93,6 +96,9 @@ class SerializableMember:
     name: str
     display_name: str
     roles: list[int]
+    guild_id: int
+    avatar: str
+    color: int
 
 
 @dataclass
@@ -127,7 +133,6 @@ class DiscordEvent:
         member: Optional["discord.Member"],
         content: str,
     ) -> "DiscordEvent":
-        print(channel)
         return cls(
             type=type,
             timestamp=timestamp,
@@ -135,7 +140,15 @@ class DiscordEvent:
             channel=SerializableTextChannel(channel.id, channel.name)
             if channel and hasattr(channel, "id") and hasattr(channel, "name")
             else None,
-            member=SerializableMember(member.id, member.name, member.display_name, [role.id for role in member.roles])
+            member=SerializableMember(
+                member.id,
+                member.name,
+                member.display_name,
+                [role.id for role in member.roles],
+                member.guild.id,
+                str(member.avatar.url) if member.avatar else None,
+                member.color,
+            )
             if member
             else None,
             content=content,

@@ -1,3 +1,4 @@
+import io
 import math
 import random
 
@@ -13,7 +14,7 @@ class Bird(Critter):
     This class handles the bird's movement, appearance, and lifecycle.
     """
 
-    def __init__(self, member_id: int, x: int, y: int, width: int, height: int) -> None:
+    def __init__(self, member_id: int, x: int, y: int, width: int, height: int, avatar=None) -> None:
         """Initialize a new Bird instance.
 
         Args:
@@ -23,6 +24,7 @@ class Bird(Critter):
             y (int): The y-coordinate of the bird's position.
             width (int): The width of the simulation area.
             height (int): The height of the simulation area.
+            avatar (bytes): The avatar data for the bird.
 
         """
         self.max_height = height * 0.6
@@ -36,6 +38,16 @@ class Bird(Critter):
         self.turn_chance = 0.02
         self.target_angle = 0
         self.turn_speed = random.uniform(0.5, 1.5)
+
+        self.avatar = avatar
+        self.avatar_surface = None
+        if self.avatar:
+            try:
+                avatar_io = io.BytesIO(self.avatar)
+                avatar_image = pygame.image.load(avatar_io)
+                self.avatar_surface = pygame.transform.scale(avatar_image, (64, 64)).convert_alpha()
+            except Exception as e:
+                print(f"Failed to create avatar surface for frog {member_id}: {e}")
 
     def generate_color(self) -> tuple[int, int, int]:
         """Generate a random color for the bird.
@@ -102,16 +114,40 @@ class Bird(Critter):
             surface (Surface): The pygame surface to draw on.
 
         """
-        pygame.draw.circle(surface, self.color, (int(self.position.x), int(self.position.y)), int(self.size))
+        # Create a surface for the bird body
+        bird_surface = pygame.Surface((int(self.size * 2), int(self.size * 2)), pygame.SRCALPHA)
+        body_rect = pygame.Rect(0, 0, int(self.size * 2), int(self.size * 2))
 
+        # Draw the avatar with 50% opacity if available
+        if self.avatar_surface:
+            avatar_scaled = pygame.transform.scale(self.avatar_surface, (int(self.size * 2), int(self.size * 2)))
+            avatar_scaled.set_alpha(128)  # 50% opacity
+            bird_surface.blit(avatar_scaled, (0, 0))
+
+        # Draw the bird body shape
+        pygame.draw.circle(bird_surface, self.color, (int(self.size), int(self.size)), int(self.size))
+
+        # Create a mask from the body shape
+        mask = pygame.mask.from_surface(bird_surface)
+        mask_surface = mask.to_surface(setcolor=self.color, unsetcolor=(0, 0, 0, 0))
+
+        # Combine the avatar and the bird shape using the mask
+        bird_surface.blit(mask_surface, (0, 0), special_flags=pygame.BLEND_RGBA_MULT)
+
+        # Draw the combined bird surface on the main surface
+        surface.blit(bird_surface, (int(self.position.x - self.size), int(self.position.y - self.size)))
+
+        # Draw wings
         left_wing = self.position + Vector2(-self.size, 0).rotate(self.wing_angle)
         right_wing = self.position + Vector2(self.size, 0).rotate(-self.wing_angle)
         pygame.draw.polygon(surface, self.color, [self.position, left_wing, right_wing])
 
+        # Draw eye
         eye_position = self.position + self.velocity.normalize() * self.size * 0.5
         pygame.draw.circle(surface, (255, 255, 255), (int(eye_position.x), int(eye_position.y)), int(self.size * 0.2))
         pygame.draw.circle(surface, (0, 0, 0), (int(eye_position.x), int(eye_position.y)), int(self.size * 0.1))
 
+        # Draw beak
         beak_position = self.position + self.velocity.normalize() * self.size
         pygame.draw.polygon(
             surface,

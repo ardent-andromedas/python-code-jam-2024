@@ -17,7 +17,7 @@ class SpeechBubble:
         critter: Critter,
         content: str,
         duration: float = 5.0,
-        bg_color: tuple[int, int, int] = (255, 255, 255),
+        bg_color: str = "#FFFFFF",
         text_color: tuple[int, int, int] = (0, 0, 0),
         border_color: tuple[int, int, int] = (0, 0, 0),
         font_size: int = 28,
@@ -30,7 +30,7 @@ class SpeechBubble:
         self.content = content
         self.duration = duration
         self.creation_time = time.time()
-        self.bg_color = bg_color
+        self.bg_color = self.hex_to_rgb(bg_color)
         self.text_color = text_color
         self.border_color = border_color
         self.font_size = font_size
@@ -43,6 +43,11 @@ class SpeechBubble:
         self.surface = None
         self.position = (self.critter.x, self.critter.y)
         self._create_surface()
+
+    def hex_to_rgb(self, hex_color: str) -> tuple[int, int, int]:
+        """Convert hex color string to RGB tuple."""
+        hex_color = hex_color.lstrip("#")
+        return tuple(int(hex_color[i : i + 2], 16) for i in (0, 2, 4))
 
     def _create_surface(self) -> None:
         words = self.content.split()
