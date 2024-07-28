@@ -2,6 +2,7 @@ import asyncio
 import io
 import logging
 from collections import deque
+from datetime import datetime, timezone, timedelta
 
 import discord
 from discord import app_commands
@@ -235,6 +236,8 @@ class EcoCordClient(discord.Client):
         channels_to_stop = current_channel_ids - new_channel_ids
         channels_to_start = new_channel_ids - current_channel_ids
 
+        config_channels = [self.get_guild(guild_id).get_channel(channel) for channel in channels_to_start]
+
         await self.stop_ecosystems(guild_id, list(channels_to_stop))
         await self.start_ecosystems(guild_id, [channel for channel in new_channels if channel.id in channels_to_start])
 
@@ -243,6 +246,7 @@ class EcoCordClient(discord.Client):
             guild_id=guild_id, allowed_channels=list(new_channel_ids), gif_channel=guild_data["gif_channel_id"]
         )
         await self.database.set_guild_config(config)
+        await self.backfill_messages(guild_id=guild_id, channels=config_channels)
 
     async def send_gifs(self, guild_id: int, channel_id: int, thread_id: int) -> None:
         """Continuously sends GIFs of the ecosystem to a designated thread."""
@@ -310,6 +314,26 @@ class EcoCordClient(discord.Client):
         ]
         return sorted(existing_messages, key=lambda m: m.created_at)
 
+    async def backfill_messages(self, guild_id: int, channels: list[discord.TextChannel], after: datetime | None = None) -> None:
+        before = datetime.now(timezone.utc)
+        duration = after
+        if after is None:
+            duration = before - timedelta(minutes=60)  # default to messages in the last hour
+
+        async for channel in channels:
+            async for message in channel.history(limit=100, before=before, after=duration):
+                db_event = await event_db_builder(
+                    DiscordEvent(
+                        EventType.MESSAGE,
+                        timestamp=message.created_at,
+                        guild=guild_id,
+                        channel=channel.id,
+                        member=message.author.id,
+                        content=message.content
+                    )
+                )
+                await self.database.insert_event(db_event)
+
     async def run_bot(self) -> None:
         """Start the bot and connects to Discord."""
         print("Starting bot...")
@@ -325,12 +349,12 @@ class EcoCordClient(discord.Client):
                 channel
                 for channel in guild.text_channels
                 if channel.permissions_for(guild.me).send_messages
-                and channel.overwrites_for(guild.default_role).read_messages is not False
-                and any(
-                    role.permissions.administrator
-                    for role in guild.roles
-                    if channel.overwrites_for(role).read_messages is not False
-                )
+                   and channel.overwrites_for(guild.default_role).read_messages is not False
+                   and any(
+                role.permissions.administrator
+                for role in guild.roles
+                if channel.overwrites_for(role).read_messages is not False
+            )
             ),
             None,
         )
